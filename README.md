@@ -465,9 +465,7 @@ If issues persist, collect this information:
 - Vanilla JavaScript (no build step required)
 - Chrome Extension Manifest V3
 
-## License
 
-MIT License - see LICENSE file for details
 
 
 
