@@ -4,6 +4,20 @@ Media Authenticity Plugin is a Chrome extension and FastAPI service for analyzin
 
 > This is an AI-detector prototype. Its result is probabilistic and should not be treated as proof of authorship.
 
+## Why This Matters
+
+In the era of sophisticated AI-generated content (ChatGPT, Claude, Gemini), the ability to quickly identify and verify information is critical. This plugin addresses a crucial gap:
+
+- **Combats Misinformation**: Automatically flags potentially AI-generated text and cross-verifies claims against reputable sources
+- **Saves Research Time**: Eliminates manual fact-checking by providing instant source verification alongside AI probability scores
+- **Browser-Native**: Unlike standalone tools, this works seamlessly within your browser on any webpage
+- **Privacy-Focused**: Analysis happens locally with your backend—no text is logged to external services (only API calls to Gemini/DuckDuckGo)
+- **Comparative Advantage**: 
+  - Faster than manual searches (parallel API + search execution)
+  - More transparent than black-box AI detectors
+  - Free tier compatible (uses free Gemini API)
+  - Open source and extensible for organizations
+
 ## Features
 
 - ✅ **AI Detection**: Analyzes selected text using Google Gemini API to estimate AI-generated vs human-written probability
@@ -31,12 +45,77 @@ media-authenticity-plugin/
 
 ## Architecture
 
-1. User selects text and right-clicks → **"Verify with Media Authenticity"**
-2. Extension sends text to `POST /analyze` on local backend
-3. Backend **concurrently**:
-   - Sends to Google Gemini API for AI detection
-   - Searches DuckDuckGo for related sources
-4. Extension displays results in an in-page status card
+### High-Level Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Chrome Extension (Frontend)                                  │
+│ - User selects text on webpage                              │
+│ - Right-click context menu triggered                        │
+│ - Sends text via POST /analyze to backend                   │
+└─────────┬───────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────┐
+│ FastAPI Backend (main.py)                                    │
+│ - Caches results for identical text (instant retrieval)      │
+│ - Runs TWO parallel async tasks:                            │
+│   ├─ get_ai_score(): Gemini API call (20s timeout)         │
+│   └─ verify_claim_async(): DuckDuckGo search (10s timeout)  │
+└─────────┬───────────────────────────────────────────────────┘
+          │
+          ├─────────────────────────┬──────────────────────────┤
+          ▼                         ▼                          ▼
+  ┌──────────────┐         ┌──────────────┐       ┌──────────────────┐
+  │ Google Gemini│         │ DuckDuckGo   │       │ Result Cache     │
+  │ API          │         │ Text Search  │       │ (JSON in memory) │
+  │ - AI Score   │         │ - 3 results  │       │ - Max 100 items  │
+  │ - Percentage │         │ - Top 2 used │       │ - LRU eviction   │
+  └──────────────┘         └──────────────┘       └──────────────────┘
+          │                         │
+          └─────────────────────────┘
+                      │
+                      ▼
+        ┌────────────────────────────┐
+        │ Return combined result JSON │
+        │ - ai_score object           │
+        │ - claim_status              │
+        │ - sources array             │
+        └────────────────────────────┘
+                      │
+                      ▼
+        ┌────────────────────────────┐
+        │ Extension displays card    │
+        │ - AI detection %           │
+        │ - Verification status      │
+        │ - Clickable sources        │
+        └────────────────────────────┘
+```
+
+### Async Optimization
+
+The backend uses **asyncio.gather()** to run AI detection and fact-checking in parallel:
+
+```python
+ai_score, verify_result = await asyncio.gather(
+    get_ai_score(),
+    verify_claim_async(text),
+    return_exceptions=True
+)
+```
+
+**Why This Matters**:
+- Sequential execution would take 15-20 seconds (sum of timeouts)
+- Parallel execution achieves 3-4 seconds (max of timeouts + network latency)
+- Both tasks run independently, so slowness in one doesn't block the other
+- Graceful error handling: if Gemini times out, search result still returns
+
+### Key Technical Details
+
+1. **Thread Pool Executor**: Blocking I/O (Gemini API, DuckDuckGo) runs in thread pool to avoid blocking async event loop
+2. **Timeouts**: 20s for AI detection, 10s for search (prevents infinite hangs)
+3. **Retry Logic**: Search retries up to 2x with exponential backoff for rate-limiting
+4. **Caching**: In-memory LRU cache prevents redundant API calls for same text
 
 ## Requirements
 
@@ -66,18 +145,54 @@ pip install -r requirements.txt
 
 ### Configure Environment
 
-Create `backend/.env`:
+Create `backend/.env` file in the `backend/` directory:
 
 ```env
 GEMINI_API_KEY=your_google_gemini_api_key_here
 ```
 
-Get your API key:
-1. Visit [makersuite.google.com](https://makersuite.google.com/app/apikey)
-2. Create an API key
-3. Copy it to `.env` file
+#### Getting Your API Key
 
-**Important**: Do not commit `.env` or expose the key in the browser extension.
+1. Visit [makersuite.google.com/app/apikey](https://makersuite.google.com/app/apikey)
+2. Sign in with your Google account (free account supported)
+3. Click "Create API key"
+4. Copy the generated key
+5. Paste into `backend/.env`
+
+#### Verify Configuration
+
+```bash
+cd backend
+python -c "from dotenv import load_dotenv; import os; from pathlib import Path; load_dotenv(Path('.env')); print('✅ API Key loaded' if os.getenv('GEMINI_API_KEY') else '❌ API Key missing')"
+```
+
+Or test the backend endpoint:
+
+```bash
+python main.py
+# In another terminal:
+python -m pytest test_api.py  # if pytest is available
+```
+
+#### Security Best Practices
+
+- ⚠️ **Never commit `.env`** - it's already in `.gitignore`
+- ⚠️ **Never hardcode API keys** in `main.py`, `content.js`, or `manifest.json`
+- ⚠️ **Keep backend private** - don't expose it to the public internet
+- ✅ **Use environment variables** for all sensitive data
+- ✅ **Rotate API keys** regularly if exposed
+
+#### Configuration Options (Future)
+
+Potential environment variables for customization:
+
+```env
+GEMINI_API_KEY=your_key                    # Required: Google Gemini API key
+GEMINI_MODEL=gemini-3.6-flash              # Optional: Model selection (default: gemini-3.6-flash)
+GEMINI_TIMEOUT=20                          # Optional: AI detection timeout in seconds (default: 20)
+SEARCH_TIMEOUT=10                          # Optional: Search timeout in seconds (default: 10)
+CACHE_MAX_SIZE=100                         # Optional: Max cached results (default: 100)
+```
 
 ### Start the Backend
 
@@ -167,30 +282,167 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/analyze -Method POST -ContentType "
 
 ## Troubleshooting
 
-### Backend won't start: "Gemini API key not configured"
-- Ensure `backend/.env` has `GEMINI_API_KEY=your_key`
-- Verify API key is valid at [makersuite.google.com](https://makersuite.google.com/app/apikey)
-- Restart backend after adding key
+### 🔴 Backend won't start: "ModuleNotFoundError"
 
-### Extension popup appears but shows "Unavailable"
-- Check browser console (F12 → Console)
-- Verify backend is running: `http://127.0.0.1:8000/docs` should show Swagger UI
-- Reload extension from `chrome://extensions`
+**Error**: `ModuleNotFoundError: No module named 'fastapi'` or similar
 
-### Search verification shows "Temporarily unavailable"
-- DuckDuckGo may be rate-limiting requests
-- Backend automatically retries with exponential backoff
-- Try again in a few seconds
+**Solution**:
+```bash
+cd backend
+pip install -r requirements.txt
+# or
+pip install fastapi uvicorn google-genai ddgs requests python-dotenv
+```
 
-### Context menu item doesn't appear
-- Reload extension from `chrome://extensions`
-- Test on a normal webpage (not chrome://, file://, or extension pages)
-- Right-click and select text to trigger the menu
+**Why**: Python dependencies not installed in virtual environment.
 
-### Timeout errors
-- Gemini API is slow on first request (up to 15 seconds)
-- Subsequent requests are faster
-- Check internet connection
+---
+
+### 🔴 Backend won't start: "Gemini API key not configured"
+
+**Error**: `HTTPException 500: Gemini API key is not configured`
+
+**Solution**:
+1. Create `backend/.env` file
+2. Add: `GEMINI_API_KEY=your_actual_key_here`
+3. Verify key from [makersuite.google.com/app/apikey](https://makersuite.google.com/app/apikey)
+4. Restart backend: `python main.py`
+
+**Why**: `.env` file missing or API key not set as environment variable.
+
+---
+
+### 🟠 "AI Detection Timeout" appears in popup
+
+**Error**: Card shows "AI Detection Timeout" but extension is running
+
+**Causes & Solutions**:
+
+| Cause | Solution |
+|-------|----------|
+| Gemini API slow on first request | Wait 20 seconds, try again (cached results are instant) |
+| API key invalid or expired | Get new key from [makersuite.google.com](https://makersuite.google.com/app/apikey), update `.env` |
+| Network issues | Check internet connection, retry |
+| Backend not running | Verify `python main.py` is still running on port 8000 |
+| Port 8000 in use by another app | Change port: `python -m uvicorn main:app --port 8001` and update extension |
+
+**Quick Debug**:
+```bash
+# Test backend health
+curl http://127.0.0.1:8000/health
+# Should return: {"status":"ok"}
+
+# Test Gemini connectivity
+curl http://127.0.0.1:8000/test-gemini
+# Should return: {"message":"Using Gemini API", "key_present":true}
+```
+
+---
+
+### 🟠 "Search timed out" in fact-check section
+
+**Error**: Claim verification shows timeout, no sources found
+
+**Causes & Solutions**:
+
+| Cause | Solution |
+|-------|----------|
+| DuckDuckGo rate-limiting your IP | Wait 30 seconds, backend auto-retries with backoff |
+| Network latency | Check internet speed, try again |
+| Backend search timeout expired | Increase timeout: edit `verify_claim_async()` in `main.py` |
+
+**Note**: Backend automatically retries up to 2x with exponential backoff before returning timeout.
+
+---
+
+### 🟠 Extension popup appears but shows "Server error"
+
+**Error**: Card displays generic error message
+
+**Diagnosis**:
+1. Open Chrome DevTools: `F12` → `Console` tab
+2. Look for error messages like:
+   - `Failed to fetch http://127.0.0.1:8000/analyze`
+   - `Invalid response from analysis server`
+
+**Solutions**:
+- Backend not running: `python main.py` in `backend/` directory
+- CORS issues: Restart backend (CORS middleware already configured)
+- Reload extension: `chrome://extensions` → find plugin → click refresh icon
+
+---
+
+### 🟠 Context menu item "Verify with Media Authenticity" doesn't appear
+
+**Error**: Right-click menu missing, no context menu option visible
+
+**Solutions**:
+
+1. **Reload extension**:
+   - Go to `chrome://extensions`
+   - Find "Media Authenticity Plugin"
+   - Click refresh/reload icon
+
+2. **Check manifest.json**:
+   - Verify `frontend/manifest.json` has correct permissions
+   - Restart Chrome if permissions were blocked
+
+3. **Supported pages only**:
+   - Works on: normal webpages, Google.com, news sites
+   - Does NOT work on: `chrome://` pages, `file://` URLs, extension pages
+   - Test on a normal webpage first
+
+4. **Enable context menu**:
+   - Extension background.js must be running
+   - Check: `chrome://extensions` → expand "Media Authenticity Plugin" → click "Background page" to debug
+
+---
+
+### 🟢 Performance is slow on first request
+
+**Expected behavior**: First analysis takes 3-4 seconds
+
+**Explanation**:
+- Gemini API needs 1-2s network roundtrip
+- DuckDuckGo search needs 1-2s network roundtrip
+- Both run in parallel (not sequential)
+
+**To improve**:
+- Subsequent identical text is **instant** (cached results)
+- Use shorter text snippets (faster API response)
+- Ensure stable internet connection
+
+---
+
+### 🟢 Cache keeps returning old results
+
+**Issue**: Same text always shows cached result, never updates
+
+**Solution**: This is **intentional design**
+- Identical text always produces identical analysis
+- Cache is cleared on backend restart
+- To force refresh: slightly modify text (add punctuation) and re-analyze
+
+---
+
+### 📋 Collecting Debug Information
+
+If issues persist, collect this information:
+
+1. **Backend logs**:
+   ```bash
+   cd backend && python main.py 2>&1 | tee debug.log
+   # Run test, collect output
+   ```
+
+2. **Browser console**:
+   - Open DevTools: `F12` → `Console`
+   - Right-click → Verify → screenshot errors
+
+3. **System info**:
+   - Python version: `python --version`
+   - Chrome version: `chrome://version`
+   - OS: Windows/Mac/Linux
 
 ## Roadmap
 

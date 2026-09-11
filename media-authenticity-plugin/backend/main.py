@@ -96,13 +96,26 @@ async def verify_claim_async(text: str) -> dict[str, Any]:
         for attempt in range(max_retries):
             try:
                 loop = asyncio.get_event_loop()
+                
+                def do_search():
+                    """Synchronous search wrapper"""
+                    return DDGS().text(query, max_results=3)
+                
                 results = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: DDGS().text(query, max_results=3)),
-                    timeout=5.0
+                    loop.run_in_executor(None, do_search),
+                    timeout=10.0
                 )
+                print(f"[DEBUG] Search results found: {len(results) if results else 0}")
                 return results
+            except asyncio.TimeoutError:
+                print(f"[DEBUG] Search attempt {attempt + 1} timed out")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+                raise
             except Exception as e:
                 error_msg = str(e).lower()
+                print(f"[DEBUG] Search error on attempt {attempt + 1}: {e}")
                 # Check for rate limiting
                 if "ratelimit" in error_msg or "403" in error_msg:
                     if attempt < max_retries - 1:
@@ -176,15 +189,16 @@ Text: {truncated}"""
         """Get AI detection score from Gemini"""
         loop = asyncio.get_event_loop()
         try:
+            def make_api_call():
+                """Synchronous API call wrapper"""
+                return client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=prompt,
+                )
+            
             response = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: client.models.generate_content(
-                        model="gemini-3.6-flash",
-                        contents=prompt,
-                    )
-                ),
-                timeout=15.0
+                loop.run_in_executor(None, make_api_call),
+                timeout=20.0
             )
             
             response_text = response.text.strip()
@@ -196,12 +210,16 @@ Text: {truncated}"""
                 response_text = response_text[:-3]
             response_text = response_text.strip()
             
+            print(f"[DEBUG] AI Score response: {response_text}")
             return json.loads(response_text)
         except asyncio.TimeoutError:
+            print("[DEBUG] AI detection timed out")
             return {"percentage": 0, "label": "AI Detection Timeout"}
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            print(f"[DEBUG] JSON decode error: {e}")
             return {"percentage": 0, "label": "Invalid API Response"}
         except Exception as exc:
+            print(f"[DEBUG] AI detection error: {exc}")
             return {"percentage": 0, "label": f"AI Detection Error"}
 
     # Run AI detection and fact-check in parallel
