@@ -1,0 +1,15 @@
+# Local credentials
+.env
+*.env
+*.env.*
+!.env.example
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local tooling files
+.pytest_cache/
+.vscode/
