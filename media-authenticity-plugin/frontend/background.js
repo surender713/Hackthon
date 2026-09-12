@@ -2,7 +2,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "verify-authenticity",
     title: "Verify with Authenticity Plugin",
-    contexts: ["selection"],
+    contexts: ["selection", "image"],
   });
 });
 
@@ -11,16 +11,15 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
 
-  const selectedText = (info.selectionText || "").trim();
-  if (!selectedText) {
-    return;
-  }
+  const message = info.mediaType === "image"
+    ? { type: "VERIFY_IMAGE", action: "analyzeImage", srcUrl: info.srcUrl }
+    : { type: "VERIFY_TEXT", text: (info.selectionText || "").trim() };
+
+  if (message.type === "VERIFY_IMAGE" && !message.srcUrl) return;
+  if (message.type === "VERIFY_TEXT" && !message.text) return;
 
   try {
-    await chrome.tabs.sendMessage(tab.id, {
-      type: "VERIFY_TEXT",
-      text: selectedText,
-    });
+    await chrome.tabs.sendMessage(tab.id, message);
   } catch {
     // Content script may not be injected yet (e.g. chrome:// pages or fresh tab).
     await chrome.scripting.insertCSS({
@@ -31,9 +30,6 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       target: { tabId: tab.id },
       files: ["content.js"],
     });
-    await chrome.tabs.sendMessage(tab.id, {
-      type: "VERIFY_TEXT",
-      text: selectedText,
-    });
+    await chrome.tabs.sendMessage(tab.id, message);
   }
 });

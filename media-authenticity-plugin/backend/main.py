@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import base64
 import asyncio
 import time
 from typing import Any
@@ -26,6 +27,12 @@ load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_IMAGE_MODELS = (
+    os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.6-flash"),
+    "gemini-1.5-flash",
+    "gemini-2.5-flash",
+    "gemini-3.6-flash",
+)
 print(f"[DEBUG] GEMINI_API_KEY loaded: {bool(GEMINI_API_KEY)}")
 
 app = FastAPI(title="Media Authenticity Plugin")
@@ -40,6 +47,9 @@ app.add_middleware(
 
 class AnalyzeRequest(BaseModel):
     text: str
+
+class ImageAnalyzeRequest(BaseModel):
+    image_data: str
 
 REPUTABLE_DOMAINS = {
     "bbc.com",
@@ -295,6 +305,106 @@ Text: {truncated}"""
     cache_result(text, result)
     
     return result
+
+@app.post("/analyze-image")
+async def analyze_image(request: ImageAnalyzeRequest) -> dict[str, Any]:
+    if not request.image_data:
+        raise HTTPException(status_code=400, detail="image_data cannot be empty.")
+
+    if not GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Gemini API key is not configured. Set GEMINI_API_KEY in backend/.env.",
+        )
+
+    try:
+        image_data = request.image_data
+        mime_type = "image/jpeg"
+        if image_data.startswith("data:"):
+            header, image_data = image_data.split(",", 1)
+            mime_type = header.split(";", 1)[0].removeprefix("data:") or mime_type
+
+        image_bytes = base64.b64decode(image_data.strip(), validate=True)
+        if not image_bytes:
+            raise ValueError("Decoded image is empty.")
+
+        supported_mime_types = {
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/heic",
+            "image/heif",
+        }
+        if mime_type not in supported_mime_types:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported image format: {mime_type}.",
+            )
+
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        prompt = """Analyze this image for signs of AI generation (e.g., Midjourney, DALL-E) or digital manipulation. Look for unnatural textures, warped background elements, or anatomical inconsistencies. Reply ONLY with a JSON object in this exact format:
+{
+  "percentage": 92,
+  "label": "92% AI-Generated",
+  "manipulation_details": "Unnatural blending on the subject's hands and mismatched lighting shadows."
+}"""
+        response = None
+        model_error = None
+        for model_name in dict.fromkeys(GEMINI_IMAGE_MODELS):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        prompt,
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json"
+                    ),
+                )
+                break
+            except Exception as exc:
+                model_error = exc
+                print(f"[DEBUG] Image model {model_name} failed: {exc}")
+
+        if response is None:
+            raise model_error or RuntimeError("No image model response.")
+
+        response_text = (response.text or "").strip()
+        if not response_text:
+            raise ValueError("Gemini returned an empty response.")
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+
+        result = json.loads(response_text.strip())
+        if not isinstance(result, dict):
+            raise ValueError("Gemini returned a non-object response.")
+
+        percentage = max(0, min(100, int(result.get("percentage", 0))))
+        label = result.get("label")
+        details = result.get("manipulation_details")
+        if not isinstance(label, str) or not label.strip():
+            label = f"{percentage}% AI-Generated"
+        if not isinstance(details, str):
+            details = ""
+
+        return {
+            "percentage": percentage,
+            "label": label,
+            "manipulation_details": details,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[DEBUG] Image analysis error: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="Image analysis service is unavailable.",
+        ) from exc
 
 @app.get("/health")
 def health() -> dict[str, str]:
