@@ -1,6 +1,6 @@
 # Media Authenticity Plugin
 
-Media Authenticity Plugin is a Chrome extension and FastAPI service for analyzing selected text to detect AI-generated content and verify claims against live sources. The extension keeps verification inside the page: select text, right-click, and request an analysis.
+Media Authenticity Plugin is a Chrome extension and FastAPI service for analyzing selected text and webpage images. It estimates AI-generation probability, verifies claims against live sources, detects recurring misinformation narratives, and checks images for signs of AI generation or digital manipulation. The extension keeps verification inside the page: select text or right-click an image, then request an analysis.
 
 > This is an AI-detector prototype. Its result is probabilistic and should not be treated as proof of authorship.
 
@@ -21,8 +21,11 @@ In the era of sophisticated AI-generated content (ChatGPT, Claude, Gemini), the 
 ## Features
 
 - ✅ **AI Detection**: Analyzes selected text using Google Gemini API to estimate AI-generated vs human-written probability
+- ✅ **Image Authenticity Detection**: Right-click any webpage image to analyze it for AI-generation or digital manipulation
 - ✅ **Fact-Checking**: Verifies claims against live web sources using DuckDuckGo search
 - ✅ **Source Verification**: Identifies reputable media sources (BBC, Reuters, AP, etc.)
+- ✅ **Misinformation Pattern Detection**: Flags recurring narratives, propaganda framing, coordinated disinformation patterns, and conspiracy themes
+- ✅ **Exportable Reports**: Download text verification records as JSON, HTML, or TXT files
 - ✅ **Fast Response**: Parallel processing of AI detection and fact-checking (~3-4 seconds)
 - ✅ **Smart Caching**: Caches results for identical text selections (instant retrieval)
 - ✅ **Error Resilience**: Graceful fallbacks if one API is temporarily unavailable
@@ -50,18 +53,17 @@ media-authenticity-plugin/
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ Chrome Extension (Frontend)                                  │
-│ - User selects text on webpage                              │
-│ - Right-click context menu triggered                        │
-│ - Sends text via POST /analyze to backend                   │
+│ - User selects text or right-clicks an image                 │
+│ - Context menu sends text or image URL to content script     │
+│ - Images are converted to Base64 in the browser              │
 └─────────┬───────────────────────────────────────────────────┘
           │
           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ FastAPI Backend (main.py)                                    │
 │ - Caches results for identical text (instant retrieval)      │
-│ - Runs TWO parallel async tasks:                            │
-│   ├─ get_ai_score(): Gemini API call (20s timeout)         │
-│   └─ verify_claim_async(): DuckDuckGo search (10s timeout)  │
+│ - POST /analyze: text AI score + pattern detection + search  │
+│ - POST /analyze-image: multimodal image forensics           │
 └─────────┬───────────────────────────────────────────────────┘
           │
           ├─────────────────────────┬──────────────────────────┤
@@ -69,8 +71,9 @@ media-authenticity-plugin/
   ┌──────────────┐         ┌──────────────┐       ┌──────────────────┐
   │ Google Gemini│         │ DuckDuckGo   │       │ Result Cache     │
   │ API          │         │ Text Search  │       │ (JSON in memory) │
-  │ - AI Score   │         │ - 3 results  │       │ - Max 100 items  │
-  │ - Percentage │         │ - Top 2 used │       │ - LRU eviction   │
+   │ - Text score │         │ - 3 results  │       │ - Max 100 items  │
+   │ - Patterns   │         │ - Top 2 used │       │ - LRU eviction   │
+   │ - Image scan │         │             │       │                  │
   └──────────────┘         └──────────────┘       └──────────────────┘
           │                         │
           └─────────────────────────┘
@@ -86,9 +89,10 @@ media-authenticity-plugin/
                       ▼
         ┌────────────────────────────┐
         │ Extension displays card    │
-        │ - AI detection %           │
-        │ - Verification status      │
-        │ - Clickable sources        │
+      │ - AI detection %           │
+      │ - Narrative alerts         │
+      │ - Verification and sources │
+      │ - JSON, HTML, TXT exports  │
         └────────────────────────────┘
 ```
 
@@ -112,10 +116,12 @@ ai_score, verify_result = await asyncio.gather(
 
 ### Key Technical Details
 
-1. **Thread Pool Executor**: Blocking I/O (Gemini API, DuckDuckGo) runs in thread pool to avoid blocking async event loop
-2. **Timeouts**: 20s for AI detection, 10s for search (prevents infinite hangs)
+1. **Thread Pool Executor**: Blocking I/O (Gemini API, DuckDuckGo) runs in a thread pool to avoid blocking the async event loop
+2. **Timeouts**: 20s for text AI detection and 10s for search (prevents infinite hangs)
 3. **Retry Logic**: Search retries up to 2x with exponential backoff for rate-limiting
-4. **Caching**: In-memory LRU cache prevents redundant API calls for same text
+4. **Caching**: In-memory cache prevents redundant AI calls for identical text
+5. **Browser-side image encoding**: The content script fetches an image and sends Base64 data to avoid backend downloads from protected image URLs
+6. **Image model fallback**: Image analysis defaults to `gemini-3.6-flash`; `GEMINI_IMAGE_MODEL` can override it
 
 ## Requirements
 
@@ -149,6 +155,7 @@ Create `backend/.env` file in the `backend/` directory:
 
 ```env
 GEMINI_API_KEY=your_google_gemini_api_key_here
+GEMINI_IMAGE_MODEL=gemini-3.6-flash
 ```
 
 #### Getting Your API Key
@@ -182,13 +189,14 @@ python -m pytest test_api.py  # if pytest is available
 - ✅ **Use environment variables** for all sensitive data
 - ✅ **Rotate API keys** regularly if exposed
 
-#### Configuration Options (Future)
+#### Configuration Options
 
 Potential environment variables for customization:
 
 ```env
 GEMINI_API_KEY=your_key                    # Required: Google Gemini API key
-GEMINI_MODEL=gemini-3.6-flash              # Optional: Model selection (default: gemini-3.6-flash)
+GEMINI_MODEL=gemini-3.6-flash              # Optional: Text model selection (currently configured in main.py)
+GEMINI_IMAGE_MODEL=gemini-3.6-flash        # Optional: Image model selection
 GEMINI_TIMEOUT=20                          # Optional: AI detection timeout in seconds (default: 20)
 SEARCH_TIMEOUT=10                          # Optional: Search timeout in seconds (default: 10)
 CACHE_MAX_SIZE=100                         # Optional: Max cached results (default: 100)
@@ -222,13 +230,14 @@ The API runs at `http://127.0.0.1:8000`
 
 1. ✅ Start the backend (running on port 8000)
 2. ✅ Open any normal webpage
-3. ✅ Select text
-4. ✅ Right-click → **Verify with Media Authenticity**
+3. ✅ Select text or find an image
+4. ✅ Right-click → **Verify with Authenticity Plugin**
 5. ✅ View results in the popup card
+6. ✅ For text reports, use **Export JSON**, **Export HTML**, or **Export TXT**
 
 **Supported on**: Regular webpages (not Chrome system pages like chrome://, about://)
 
-The backend truncates submitted text to 2,000 characters before analysis.
+The backend truncates submitted text to 2,000 characters before analysis. Image data is fetched and Base64-encoded by the content script before it is sent to the backend.
 
 ## API
 
@@ -248,6 +257,10 @@ The backend truncates submitted text to 2,000 characters before analysis.
     "percentage": 85,
     "label": "85% AI-Generated"
   },
+   "pattern_data": {
+      "pattern_detected": true,
+      "narrative_summary": "Matches a recurring health misinformation narrative."
+   },
   "claim_status": "Verified in mainstream media",
   "sources": [
     {
@@ -269,7 +282,38 @@ The backend truncates submitted text to 2,000 characters before analysis.
 # Test the API
 $body = @{text = "This is a test"} | ConvertTo-Json
 Invoke-RestMethod -Uri http://127.0.0.1:8000/analyze -Method POST -ContentType "application/json" -Body $body
+
+# Test image analysis with a Base64 image data URL
+$imageBody = @{image_data = "data:image/jpeg;base64,/9j/..."} | ConvertTo-Json
+Invoke-RestMethod -Uri http://127.0.0.1:8000/analyze-image -Method POST -ContentType "application/json" -Body $imageBody
 ```
+
+### `POST /analyze-image`
+
+Analyzes a Base64-encoded image with Gemini multimodal input. The frontend sends a data URL such as `data:image/png;base64,...`, although raw Base64 is also accepted.
+
+**Request:**
+```json
+{
+   "image_data": "data:image/jpeg;base64,/9j/..."
+}
+```
+
+**Response:**
+```json
+{
+   "percentage": 35,
+   "label": "35% AI-Generated",
+   "manipulation_details": "No clear manipulation indicators were found."
+}
+```
+
+**Status Codes:**
+- `200` ✅ Success
+- `400` ❌ Empty image data
+- `415` ❌ Unsupported image format
+- `500` ❌ Missing API key
+- `502` ❌ Gemini image-analysis failure
 
 ## Performance
 
@@ -372,7 +416,23 @@ curl http://127.0.0.1:8000/test-gemini
 
 ---
 
-### 🟠 Context menu item "Verify with Media Authenticity" doesn't appear
+### 🟠 Image card shows "Image analysis service is unavailable"
+
+**Causes & Solutions**:
+
+| Cause | Solution |
+|-------|----------|
+| Backend was not restarted after an image-analysis change | Stop and restart `python main.py` |
+| Gemini image model is unavailable for the API key | Set `GEMINI_IMAGE_MODEL=gemini-3.6-flash` in `backend/.env` and restart |
+| Image format is unsupported | Use JPEG, PNG, WebP, HEIC, or HEIF; SVG images are not supported |
+| Image requires authentication or blocks browser fetches | Try a publicly accessible image or verify the page permits image requests |
+| Extension content script is stale | Reload the extension from `chrome://extensions` |
+
+The backend logs the specific Gemini model or image-processing error. The image endpoint tries the configured model first and then falls back to supported models.
+
+---
+
+### 🟠 Context menu item "Verify with Authenticity Plugin" doesn't appear
 
 **Error**: Right-click menu missing, no context menu option visible
 
@@ -446,11 +506,11 @@ If issues persist, collect this information:
 
 ## Roadmap
 
-- 🎯 Image authenticity detection
-- 🎯 Misinformation pattern detection
+- ✅ Image authenticity detection
+- ✅ Misinformation pattern detection
 - 🎯 Real-time confidence calibration
 - 🎯 Offline mode support
-- 🎯 Export analysis reports
+- ✅ Export analysis reports (JSON, HTML, TXT)
 
 ## Dependencies
 
