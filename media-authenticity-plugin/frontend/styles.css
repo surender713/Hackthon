@@ -78,6 +78,44 @@
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
 }
 
+#map-authenticity-result .map-warning-box {
+  margin: 14px 16px 0;
+  padding: 12px 13px;
+  border: 1px solid rgba(245, 158, 11, 0.42);
+  border-left: 4px solid #f59e0b;
+  border-radius: 10px;
+  background: #fffbeb;
+  color: #78350f;
+}
+
+#map-authenticity-result .map-warning-badge {
+  display: block;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+#map-authenticity-result .map-summary-text {
+  margin: 6px 0 0;
+  color: #78350f;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: dark) {
+  #map-authenticity-result .map-warning-box {
+    border-color: rgba(245, 158, 11, 0.55);
+    border-left-color: #f59e0b;
+    background: #422006;
+    color: #fef3c7;
+  }
+
+  #map-authenticity-result .map-warning-badge,
+  #map-authenticity-result .map-summary-text {
+    color: #fde68a;
+  }
+}
+
 #map-authenticity-result .map-section-heading {
   color: #64748b;
   font-size: 11px;

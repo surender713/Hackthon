@@ -17,6 +17,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .catch((error) => {
       showResultCard({
         aiScore: null,
+        patternData: null,
         tone: "error",
         claimStatus: error.message || "Analysis failed.",
         sources: [],
@@ -30,6 +31,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 async function analyzeAndShow(text) {
   showResultCard({
     aiScore: { label: "Analyzing..." },
+    patternData: null,
     tone: "pending",
     claimStatus: "Checking AI probability and live source coverage.",
     sources: [],
@@ -63,13 +65,14 @@ async function analyzeAndShow(text) {
   const isAi = Number(data.ai_score.percentage) >= 50;
   showResultCard({
     aiScore: data.ai_score,
+    patternData: data.pattern_data,
     tone: isAi ? "ai" : "human",
     claimStatus: data.claim_status,
     sources: Array.isArray(data.sources) ? data.sources : [],
   });
 }
 
-function showResultCard({ aiScore, tone, claimStatus, sources }) {
+function showResultCard({ aiScore, patternData, tone, claimStatus, sources }) {
   removeExistingCard();
 
   const card = document.createElement("div");
@@ -104,6 +107,16 @@ function showResultCard({ aiScore, tone, claimStatus, sources }) {
   aiValue.textContent = aiScore?.label || "Unavailable";
   aiSection.append(aiHeading, aiValue);
 
+  const warningSection = document.createElement("section");
+  warningSection.className = "map-warning-box";
+  const warningBadge = document.createElement("strong");
+  warningBadge.className = "map-warning-badge";
+  warningBadge.textContent = "⚠️ Narrative Alert";
+  const summary = document.createElement("p");
+  summary.className = "map-summary-text";
+  summary.textContent = patternData?.narrative_summary || "";
+  warningSection.append(warningBadge, summary);
+
   const sourceSection = document.createElement("section");
   sourceSection.className = "map-result-section map-source-section";
   const sourceHeading = document.createElement("div");
@@ -130,7 +143,11 @@ function showResultCard({ aiScore, tone, claimStatus, sources }) {
   });
   if (links.children.length) sourceSection.appendChild(links);
 
-  card.append(header, aiSection, sourceSection);
+  if (patternData?.pattern_detected === true && patternData.narrative_summary) {
+    card.append(header, aiSection, warningSection, sourceSection);
+  } else {
+    card.append(header, aiSection, sourceSection);
+  }
   document.documentElement.appendChild(card);
   positionNearSelection(card);
 }
