@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google import genai
+from google.genai import types
 
 try:
     from ddgs import DDGS
@@ -179,9 +180,23 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     truncated = text[:2000]
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-    prompt = f"""Analyze if this text is AI-generated or human-written.
-Return ONLY this JSON format:
-{{"percentage": <0-100>, "label": "<number>% <AI-Generated|Human-Written>"}}
+    prompt = f"""Analyze the text below for two separate purposes:
+1. Estimate the probability that the text was AI-generated rather than human-written.
+2. Detect recurring misinformation narratives, coordinated disinformation patterns, or known conspiracy themes. Consider recognizable propaganda framing and recurring claims, but do not label a pattern solely because the claim is controversial.
+
+Return ONLY valid JSON matching this exact schema. Do not include Markdown, code fences, or any additional text:
+{{
+    "percentage": 85,
+    "label": "85% AI-Generated",
+    "pattern_detected": true,
+    "narrative_summary": "Matches known health/vaccine misinformation narratives regarding fake regulatory directives."
+}}
+
+Rules:
+- percentage must be an integer from 0 to 100.
+- label must state the percentage followed by either "AI-Generated" or "Human-Written".
+- pattern_detected must be a boolean.
+- narrative_summary must be a concise explanation when pattern_detected is true, otherwise an empty string.
 
 Text: {truncated}"""
 
@@ -194,6 +209,7 @@ Text: {truncated}"""
                 return client.models.generate_content(
                     model="gemini-3.6-flash",
                     contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json"),
                 )
             
             response = await asyncio.wait_for(
@@ -211,16 +227,46 @@ Text: {truncated}"""
             response_text = response_text.strip()
             
             print(f"[DEBUG] AI Score response: {response_text}")
-            return json.loads(response_text)
+            parsed = json.loads(response_text)
+            percentage = parsed.get("percentage", 0)
+            try:
+                percentage = max(0, min(100, int(percentage)))
+            except (TypeError, ValueError):
+                percentage = 0
+
+            label = parsed.get("label")
+            if not isinstance(label, str) or not label.strip():
+                label = f"{percentage}% AI-Generated"
+
+            return {
+                "ai_score": {"percentage": percentage, "label": label},
+                "pattern_data": {
+                    "pattern_detected": parsed.get("pattern_detected") is True,
+                    "narrative_summary": (
+                        parsed.get("narrative_summary")
+                        if isinstance(parsed.get("narrative_summary"), str)
+                        else ""
+                    ),
+                },
+            }
         except asyncio.TimeoutError:
             print("[DEBUG] AI detection timed out")
-            return {"percentage": 0, "label": "AI Detection Timeout"}
+            return {
+                "ai_score": {"percentage": 0, "label": "AI Detection Timeout"},
+                "pattern_data": {"pattern_detected": False, "narrative_summary": ""},
+            }
         except json.JSONDecodeError as e:
             print(f"[DEBUG] JSON decode error: {e}")
-            return {"percentage": 0, "label": "Invalid API Response"}
+            return {
+                "ai_score": {"percentage": 0, "label": "Invalid API Response"},
+                "pattern_data": {"pattern_detected": False, "narrative_summary": ""},
+            }
         except Exception as exc:
             print(f"[DEBUG] AI detection error: {exc}")
-            return {"percentage": 0, "label": f"AI Detection Error"}
+            return {
+                "ai_score": {"percentage": 0, "label": "AI Detection Error"},
+                "pattern_data": {"pattern_detected": False, "narrative_summary": ""},
+            }
 
     # Run AI detection and fact-check in parallel
     ai_score, verify_result = await asyncio.gather(
@@ -231,11 +277,21 @@ Text: {truncated}"""
 
     # Handle potential exceptions from gather
     if isinstance(ai_score, Exception):
-        ai_score = {"percentage": 0, "label": "AI Detection Unavailable"}
+        ai_score = {
+            "ai_score": {"percentage": 0, "label": "AI Detection Unavailable"},
+            "pattern_data": {"pattern_detected": False, "narrative_summary": ""},
+        }
     if isinstance(verify_result, Exception):
         verify_result = {"claim_status": "Verification unavailable", "sources": []}
 
-    result = {"ai_score": ai_score, **verify_result}
+    result = {
+        "ai_score": ai_score.get("ai_score", {"percentage": 0, "label": "AI Detection Unavailable"}),
+        "pattern_data": ai_score.get(
+            "pattern_data",
+            {"pattern_detected": False, "narrative_summary": ""},
+        ),
+        **verify_result,
+    }
     cache_result(text, result)
     
     return result
