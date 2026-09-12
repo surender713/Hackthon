@@ -1,7 +1,28 @@
 const RESULT_CARD_ID = "map-authenticity-result";
 const ANALYZE_URL = "http://127.0.0.1:8000/analyze";
+const ANALYZE_IMAGE_URL = "http://127.0.0.1:8000/analyze-image";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.action === "analyzeImage") {
+    if (!message.srcUrl) {
+      sendResponse({ ok: false, error: "No image URL provided." });
+      return;
+    }
+
+    analyzeImageAndShow(message.srcUrl)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => {
+        showImageResultCard({
+          score: null,
+          tone: "error",
+          details: error.message || "Image analysis failed.",
+        });
+        sendResponse({ ok: false, error: error.message });
+      });
+
+    return true;
+  }
+
   if (message?.type !== "VERIFY_TEXT") {
     return;
   }
@@ -28,6 +49,108 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
+
+async function analyzeImageAndShow(srcUrl) {
+  showImageResultCard({
+    score: { label: "Analyzing..." },
+    tone: "pending",
+    details: "Analyzing image authenticity...",
+  });
+
+  const imageResponse = await fetch(srcUrl);
+  if (!imageResponse.ok) {
+    throw new Error(`Unable to fetch image (${imageResponse.status}).`);
+  }
+
+  const imageData = await blobToDataUrl(await imageResponse.blob());
+  const response = await fetch(ANALYZE_IMAGE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image_data: imageData }),
+  });
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error("Invalid response from image analysis server.");
+  }
+
+  if (!response.ok) {
+    const detail =
+      typeof data?.detail === "string"
+        ? data.detail
+        : `Image analysis server error (${response.status}).`;
+    throw new Error(detail);
+  }
+
+  if (!data || typeof data.label !== "string") {
+    throw new Error("Unexpected image analysis response.");
+  }
+
+  const isAi = Number(data.percentage) >= 50;
+  showImageResultCard({
+    score: data,
+    tone: isAi ? "ai" : "human",
+    details: data.manipulation_details || "No manipulation details provided.",
+  });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Unable to convert image data."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function showImageResultCard({ score, tone, details }) {
+  removeExistingCard();
+
+  const card = document.createElement("div");
+  card.id = RESULT_CARD_ID;
+  card.className = `map-result-card map-tone-${tone}`;
+  card.setAttribute("role", "status");
+  card.setAttribute("aria-live", "polite");
+
+  const header = document.createElement("div");
+  header.className = "map-result-header";
+  const title = document.createElement("div");
+  title.className = "map-result-title";
+  title.textContent = "Image Authenticity";
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "map-result-close";
+  closeBtn.setAttribute("aria-label", "Close");
+  closeBtn.textContent = "✕";
+  closeBtn.addEventListener("click", () => card.remove());
+  header.append(title, closeBtn);
+
+  const scoreSection = document.createElement("section");
+  scoreSection.className = "map-result-section map-ai-section";
+  const scoreHeading = document.createElement("div");
+  scoreHeading.className = "map-section-heading";
+  scoreHeading.textContent = "Image AI Detection";
+  const scoreValue = document.createElement("strong");
+  scoreValue.className = "map-ai-value";
+  scoreValue.textContent = score?.label || "Unavailable";
+  scoreSection.append(scoreHeading, scoreValue);
+
+  const detailsSection = document.createElement("section");
+  detailsSection.className = "map-result-section map-image-details";
+  const detailsHeading = document.createElement("div");
+  detailsHeading.className = "map-section-heading";
+  detailsHeading.textContent = "Manipulation Details";
+  const detailsText = document.createElement("p");
+  detailsText.className = "map-summary-text";
+  detailsText.textContent = details || "";
+  detailsSection.append(detailsHeading, detailsText);
+
+  card.append(header, scoreSection, detailsSection);
+  document.documentElement.appendChild(card);
+  positionNearSelection(card);
+}
 
 async function analyzeAndShow(text) {
   showResultCard({
