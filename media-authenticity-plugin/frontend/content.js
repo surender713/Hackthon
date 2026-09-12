@@ -16,6 +16,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .then(() => sendResponse({ ok: true }))
     .catch((error) => {
       showResultCard({
+        originalText: text,
         aiScore: null,
         patternData: null,
         tone: "error",
@@ -30,6 +31,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function analyzeAndShow(text) {
   showResultCard({
+    originalText: text,
     aiScore: { label: "Analyzing..." },
     patternData: null,
     tone: "pending",
@@ -64,6 +66,7 @@ async function analyzeAndShow(text) {
 
   const isAi = Number(data.ai_score.percentage) >= 50;
   showResultCard({
+    originalText: text,
     aiScore: data.ai_score,
     patternData: data.pattern_data,
     tone: isAi ? "ai" : "human",
@@ -72,7 +75,7 @@ async function analyzeAndShow(text) {
   });
 }
 
-function showResultCard({ aiScore, patternData, tone, claimStatus, sources }) {
+function showResultCard({ originalText, aiScore, patternData, tone, claimStatus, sources }) {
   removeExistingCard();
 
   const card = document.createElement("div");
@@ -148,8 +151,171 @@ function showResultCard({ aiScore, patternData, tone, claimStatus, sources }) {
   } else {
     card.append(header, aiSection, sourceSection);
   }
+
+  const verificationState = {
+    original_text: originalText || "",
+    ai_score: aiScore || null,
+    pattern_data: patternData || null,
+    claim_status: claimStatus || "",
+    sources: Array.isArray(sources) ? sources : [],
+  };
+
+  const actionsFooter = document.createElement("footer");
+  actionsFooter.className = "map-actions-footer";
+
+  const exportJsonButton = createExportButton("⬇️ Export JSON", () => {
+    const report = createReport(verificationState);
+    downloadReport(
+      JSON.stringify(report, null, 2),
+      `authenticity-report-${getFilenameTimestamp(report.timestamp)}.json`,
+      "application/json",
+    );
+  });
+  const exportHtmlButton = createExportButton("⬇️ Export HTML", () => {
+    const report = createReport(verificationState);
+    downloadReport(
+      createHtmlReport(report),
+      `authenticity-report-${getFilenameTimestamp(report.timestamp)}.html`,
+      "text/html",
+    );
+  });
+  const exportTxtButton = createExportButton("⬇️ Export TXT", () => {
+    const report = createReport(verificationState);
+    downloadReport(
+      createTextReport(report),
+      `authenticity-report-${getFilenameTimestamp(report.timestamp)}.txt`,
+      "text/plain",
+    );
+  });
+
+  actionsFooter.append(exportJsonButton, exportHtmlButton, exportTxtButton);
+  card.appendChild(actionsFooter);
   document.documentElement.appendChild(card);
   positionNearSelection(card);
+}
+
+function createReport(verificationState) {
+  return {
+    ...verificationState,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function createExportButton(label, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "map-export-btn";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function getFilenameTimestamp(timestamp) {
+  return timestamp.replace(/[:.]/g, "-");
+}
+
+function downloadReport(content, filename, mimeType) {
+  const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function createHtmlReport(report) {
+  const patternData = report.pattern_data || {};
+  const patternDetected = patternData.pattern_detected === true;
+  const sources = report.sources
+    .map(
+      (source) =>
+        `<li><a href="${escapeHtml(source?.url || "")}">${escapeHtml(
+          source?.title || source?.url || "Source",
+        )}</a></li>`,
+    )
+    .join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media Authenticity Report</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, sans-serif; }
+    body { max-width: 760px; margin: 40px auto; padding: 0 24px; color: #1f2937; line-height: 1.6; }
+    h1 { color: #0f172a; font-size: 28px; }
+    h2 { margin-top: 28px; color: #334155; font-size: 18px; }
+    .meta { color: #64748b; font-size: 14px; }
+    .original-text { white-space: pre-wrap; padding: 16px; border-left: 4px solid #94a3b8; background: #f8fafc; }
+    .result { padding: 14px 16px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+    .warning { border-left: 4px solid #f59e0b; background: #fffbeb; }
+    .label { font-weight: 700; }
+    a { color: #1d4ed8; }
+  </style>
+</head>
+<body>
+  <h1>Media Authenticity Report</h1>
+  <p class="meta">Generated: ${escapeHtml(report.timestamp)}</p>
+  <h2>Original Text</h2>
+  <div class="original-text">${escapeHtml(report.original_text)}</div>
+  <h2>AI Detection</h2>
+  <div class="result"><span class="label">${escapeHtml(
+    report.ai_score?.label || "Unavailable",
+  )}</span></div>
+  <h2>Narrative Pattern Detection</h2>
+  <div class="result${patternDetected ? " warning" : ""}">
+    <span class="label">${patternDetected ? "Narrative Alert" : "No recurring pattern detected"}</span>
+    <p>${escapeHtml(patternData.narrative_summary || "")}</p>
+  </div>
+  <h2>Fact-Check / Source Verification</h2>
+  <div class="result">${escapeHtml(report.claim_status || "No verification status available.")}</div>
+  ${sources ? `<ul>${sources}</ul>` : ""}
+</body>
+</html>`;
+}
+
+function createTextReport(report) {
+  const patternData = report.pattern_data || {};
+  const sources = report.sources
+    .map((source) => `- ${source?.title || source?.url || "Source"}: ${source?.url || ""}`)
+    .join("\n");
+
+  return `MEDIA AUTHENTICITY REPORT
+===========================
+Generated: ${report.timestamp}
+
+ORIGINAL TEXT
+-------------
+${report.original_text}
+
+AI DETECTION
+------------
+${report.ai_score?.label || "Unavailable"}
+
+NARRATIVE PATTERN DETECTION
+---------------------------
+Detected: ${patternData.pattern_detected === true ? "Yes" : "No"}
+${patternData.narrative_summary || "No recurring misinformation patterns detected."}
+
+FACT-CHECK / SOURCE VERIFICATION
+--------------------------------
+${report.claim_status || "No verification status available."}
+${sources ? `\nSOURCES\n-------\n${sources}` : ""}
+`;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 function positionNearSelection(card) {
